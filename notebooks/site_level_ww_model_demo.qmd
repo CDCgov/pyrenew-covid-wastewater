@@ -1,0 +1,361 @@
+---
+jupyter: python3
+---
+
+```{python}
+import json
+
+import numpyro
+import numpyro.distributions as dist
+import numpyro.distributions.transforms as transforms
+from pyrenew.deterministic import DeterministicVariable, DeterministicPMF
+
+from pyrenew.randomvariable import DistributionalVariable, TransformedVariable
+from pyrenew_hew.site_level_dynamics_model import ww_site_level_dynamics_model
+from pyrenew_hew.initialization import get_initialization
+import jax
+
+numpyro.set_host_device_count(4)
+```
+
+```{python}
+with open("data/fit/stan_data.json","r") as file:
+    stan_data = json.load(file)
+
+#helper function
+from pyrenew_hew.utils import *
+```
+
+```{python}
+gt_max = stan_data["gt_max"] #lower=1
+hosp_delay_max = stan_data["hosp_delay_max"]
+n_initialization_points = max(gt_max, hosp_delay_max)
+i0_t_offset = 0 # check this later
+
+# maximum time index for the hospital admissions (max number of days we could have observations)
+obs_time = stan_data["ot"]
+horizon_time = stan_data["ht"] #horizon time (nowcast + forecast time)
+n_weeks = stan_data["n_weeks"]
+unobs_time = stan_data["uot"] #unobserved time before we observe hospital admissions/ WW
+#n_datapoints = obs_time+horizon_time
+
+n_subpops = stan_data["n_subpops"]  #number of WW sites
+state_pop = stan_data["state_pop"]
+subpop_size = stan_data["subpop_size"]
+norm_pop = stan_data["norm_pop"]
+pop_fraction = jnp.array(subpop_size)/norm_pop
+
+#mL of ww produced per person per day
+ww_ml_produced_per_day = stan_data["mwpd"]
+n_ww_lab_sites = stan_data["n_ww_lab_sites"]
+ww_log_lod =jnp.array(stan_data["ww_log_lod"])  # The limit of detection in that site at that time point
+lab_site_to_site_map = jnp.array(stan_data["lab_site_to_site_map"])    # which lab sites correspond to which sites
+
+n_censored = stan_data["n_censored"]
+n_uncensored = stan_data["n_uncensored"]
+ww_censored = jnp.array(stan_data["ww_censored"])  #times that the WW data is below the LOD
+ww_uncensored = jnp.array(stan_data["ww_uncensored"])  #time that WW data is above LOD
+
+obs_ww_days = stan_data["owt"]  #number of days of observed WW (should be roughly ot/7)
+
+ww_sampled_sites = jnp.array(stan_data["ww_sampled_sites"])    # vector of unique sites in order of the sampled times
+ww_sampled_times = jnp.array(stan_data["ww_sampled_times"])   # a list of all of the days on which WW is sampled
+ww_sampled_lab_sites = jnp.array(stan_data["ww_sampled_lab_sites"])
+
+data_observed_log_conc = jnp.array(stan_data["log_conc"])
+data_observed_hospital_admissions = jnp.array(stan_data["hosp"])
+
+```
+
+```{python}
+# State-leve R(t) AR + RW implementation:
+
+eta_sd_sd = stan_data["eta_sd_sd"]
+eta_sd_rv = DistributionalVariable("eta_sd", dist.TruncatedNormal(0, eta_sd_sd, low=0))
+
+autoreg_rt_a = stan_data["autoreg_rt_a"]
+autoreg_rt_b = stan_data["autoreg_rt_b"]
+autoreg_rt_rv = DistributionalVariable("autoreg_rt", dist.Beta(autoreg_rt_a, autoreg_rt_b))
+
+r_prior_mean = stan_data["r_prior_mean"]
+r_prior_sd = stan_data["r_prior_sd"]
+r_logmean, r_logsd = convert_to_logmean_log_sd(r_prior_mean, r_prior_sd)
+
+# log of state level mean R(t) in weeks
+log_r_mu_intercept_rv = DistributionalVariable(
+    "log_r_mu_intercept_rv", dist.Normal(r_logmean, r_logsd)
+)
+
+```
+
+```{python}
+# viral shedding parameters
+viral_shedding_pars = stan_data["viral_shedding_pars"]
+
+t_peak_mean = viral_shedding_pars[0]
+t_peak_sd = viral_shedding_pars[1]
+viral_peak_mean = viral_shedding_pars[2]
+viral_peak_sd = viral_shedding_pars[3]
+dur_shed_mean = viral_shedding_pars[4]
+dur_shed_sd = viral_shedding_pars[5]
+
+t_peak_rv = DistributionalVariable(
+    "t_peak", dist.TruncatedNormal(t_peak_mean, t_peak_sd,low=0)
+)
+
+viral_peak_rv = DistributionalVariable(
+    "viral_peak", dist.Normal(viral_peak_mean, viral_peak_sd)
+)
+
+dur_shed_after_peak_rv = DistributionalVariable(
+    "dur_shed_after_peak", dist.TruncatedNormal(dur_shed_mean, dur_shed_sd, low=0)
+)
+max_shed_interval = dur_shed_mean + 3*dur_shed_sd
+```
+
+```{python}
+# Infection and site-level dynamics
+infection_feedback_prior_logmean = stan_data["inf_feedback_prior_logmean"]
+infection_feedback_prior_logsd = stan_data["inf_feedback_prior_logsd"]
+infection_feedback_strength_rv = TransformedVariable(
+    "inf_feedback",
+    DistributionalVariable(
+        "inf_feedback_raw",
+        dist.LogNormal(infection_feedback_prior_logmean, infection_feedback_prior_logsd),
+    ),
+    transforms=transforms.AffineTransform(loc=0, scale=-1),
+)
+
+infection_feedback_pmf = stan_data["infection_feedback_pmf"]
+infection_feedback_pmf_rv = DeterministicPMF(
+    "infection_feedback_pmf", jnp.array(infection_feedback_pmf)
+)
+
+# generation interval distribution
+generation_interval = stan_data["generation_interval"]
+generation_interval_pmf_rv = DeterministicPMF(
+    "generation_interval_pmf", jnp.array(generation_interval)
+)
+
+autoreg_rt_site_a = stan_data["autoreg_rt_site_a"]
+autoreg_rt_site_b = stan_data["autoreg_rt_site_b"]
+autoreg_rt_site_rv = DistributionalVariable(
+    "autoreg_rt_site",dist.Beta(autoreg_rt_site_a, autoreg_rt_site_b)
+    )
+
+sigma_rt_prior = stan_data["sigma_rt_prior"]
+sigma_rt_rv = DistributionalVariable(
+    "sigma_rt", dist.TruncatedNormal(0,sigma_rt_prior,low=0)
+)
+
+i_first_obs_over_n_prior_a = stan_data["i_first_obs_over_n_prior_a"]
+i_first_obs_over_n_prior_b = stan_data["i_first_obs_over_n_prior_b"]
+i_first_obs_over_n_rv = DistributionalVariable(
+    "i_first_obs_over_n", dist.Beta(i_first_obs_over_n_prior_a, i_first_obs_over_n_prior_b)
+)
+
+sigma_i_first_obs_prior_mode = stan_data["sigma_i_first_obs_prior_mode"]
+sigma_i_first_obs_prior_sd = stan_data["sigma_i_first_obs_prior_sd"]
+sigma_i_first_obs_rv = DistributionalVariable(
+    "sigma_i_first_obs", dist.TruncatedNormal(
+        sigma_i_first_obs_prior_mode,sigma_i_first_obs_prior_sd,low=0
+        )
+)
+
+sigma_initial_exp_growth_rate_prior_mode = stan_data["sigma_initial_exp_growth_rate_prior_mode"]
+sigma_initial_exp_growth_rate_prior_sd = stan_data["sigma_initial_exp_growth_rate_prior_sd"]
+sigma_initial_exp_growth_rate_rv = DistributionalVariable(
+    "sigma_initial_exp_growth_rate", dist.TruncatedNormal(
+        sigma_initial_exp_growth_rate_prior_mode,sigma_initial_exp_growth_rate_prior_sd,low=0
+        )
+)
+
+mean_initial_exp_growth_rate_prior_mean = stan_data["mean_initial_exp_growth_rate_prior_mean"]
+mean_initial_exp_growth_rate_prior_sd = stan_data["mean_initial_exp_growth_rate_prior_sd"]
+#stan code uses normal distribution but hosp_only model uses TruncatedNormal
+mean_initial_exp_growth_rate_rv = DistributionalVariable(
+    "mean_initial_exp_growth_rate", dist.TruncatedNormal(
+        loc=mean_initial_exp_growth_rate_prior_mean,
+        scale=mean_initial_exp_growth_rate_prior_sd,
+        low=-1,
+        high=1,
+    )
+)
+
+```
+
+```{python}
+p_hosp_prior_mean = stan_data["p_hosp_prior_mean"]
+p_hosp_sd_logit = stan_data["p_hosp_sd_logit"]
+p_hosp_mean_rv = DistributionalVariable(
+    "p_hosp_mean",
+    dist.Normal(transforms.logit(p_hosp_prior_mean), p_hosp_sd_logit),
+)  # logit scale
+
+p_hosp_w_sd_sd = stan_data["p_hosp_w_sd_sd"]
+p_hosp_w_sd_rv = DistributionalVariable(
+    "p_hosp_w_sd", dist.TruncatedNormal(0, p_hosp_w_sd_sd, low=0)
+)
+
+autoreg_p_hosp_a = stan_data["autoreg_p_hosp_a"]
+autoreg_p_hosp_b = stan_data["autoreg_p_hosp_b"]
+autoreg_p_hosp_rv = DistributionalVariable(
+    "autoreg_p_hosp", dist.Beta(autoreg_p_hosp_a, autoreg_p_hosp_b)
+)
+
+hosp_wday_effect_rv = TransformedVariable(
+    "hosp_wday_effect",
+    DistributionalVariable(
+        "hosp_wday_effect_raw",
+        dist.Dirichlet(jnp.array(stan_data["hosp_wday_effect_prior_alpha"])),
+    ),
+    transforms.AffineTransform(loc=0, scale=7),
+)
+
+inf_to_hosp_rv = DeterministicVariable(
+    "inf_to_hosp", jnp.array(stan_data["inf_to_hosp"])
+)
+
+inv_sqrt_phi_prior_mean = stan_data["inv_sqrt_phi_prior_mean"]
+inv_sqrt_phi_prior_sd = stan_data["inv_sqrt_phi_prior_sd"]
+
+phi_rv = TransformedVariable(
+    "phi",
+    DistributionalVariable(
+        "inv_sqrt_phi",
+        dist.TruncatedNormal(
+            loc=inv_sqrt_phi_prior_mean,
+            scale=inv_sqrt_phi_prior_sd,
+            low=1 / jnp.sqrt(5000),
+        ),
+    ),
+    transforms=transforms.PowerTransform(-2),
+)
+
+```
+
+```{python}
+log10_g_prior_mean = stan_data["log10_g_prior_mean"] # mean log10 of number of genomes per infected individual
+log10_g_prior_sd = stan_data["log10_g_prior_sd"]
+log10_g_rv = DistributionalVariable(
+    "log10_g", dist.Normal(log10_g_prior_mean, log10_g_prior_sd)
+)
+
+mode_sigma_ww_site_prior_mode = stan_data["mode_sigma_ww_site_prior_mode"]
+mode_sigma_ww_site_prior_sd = stan_data["mode_sigma_ww_site_prior_sd"]
+mode_sigma_ww_site_rv = DistributionalVariable(
+    "mode_sigma_ww_site", dist.Normal(mode_sigma_ww_site_prior_mode,mode_sigma_ww_site_prior_sd)
+)
+
+sd_log_sigma_ww_site_prior_mode = stan_data["sd_log_sigma_ww_site_prior_mode"]
+sd_log_sigma_ww_site_prior_sd = stan_data["sd_log_sigma_ww_site_prior_sd"]
+sd_log_sigma_ww_site_rv = DistributionalVariable(
+    "sd_log_sigma_ww_site", dist.TruncatedNormal(sd_log_sigma_ww_site_prior_mode, sd_log_sigma_ww_site_prior_sd,low=0)
+)
+
+ww_site_mod_sd_sd = stan_data["ww_site_mod_sd_sd"]
+ww_site_mod_sd_rv = DistributionalVariable(
+    "ww_site_mod_sd", dist.TruncatedNormal(0,ww_site_mod_sd_sd,low=0)
+)
+```
+
+```{python}
+my_model = ww_site_level_dynamics_model(
+    state_pop,
+    n_subpops,
+    n_ww_lab_sites,
+    unobs_time,
+    n_initialization_points,
+    max_shed_interval,
+    i0_t_offset,
+    log_r_mu_intercept_rv,
+    autoreg_rt_rv,
+    eta_sd_rv,
+    t_peak_rv,
+    viral_peak_rv,
+    dur_shed_rv,
+    autoreg_rt_site_rv,
+    sigma_rt_rv,
+    i_first_obs_over_n_rv,
+    sigma_i_first_obs_rv,
+    sigma_initial_exp_growth_rate_rv,
+    mean_initial_exp_growth_rate_rv,
+    generation_interval_pmf_rv,
+    infection_feedback_strength_rv,
+    infection_feedback_pmf_rv,
+    p_hosp_mean_rv,
+    p_hosp_w_sd_rv,
+    autoreg_p_hosp_rv,
+    hosp_wday_effect_rv,
+    inf_to_hosp_rv,
+    log10_g_rv,
+    mode_sigma_ww_site_rv,
+    sd_log_sigma_ww_site_rv,
+    ww_site_mod_sd_rv,
+    phi_rv,
+    ww_ml_produced_per_day,
+    pop_fraction,
+    ww_uncensored,
+    ww_censored,
+    ww_sampled_lab_sites,
+    ww_sampled_sites,
+    ww_sampled_times,
+    ww_log_lod,
+    lab_site_to_site_map
+)
+```
+
+```{python}
+with numpyro.handlers.seed(rng_seed=242):
+    test_model_sample = my_model.sample(n_datapoints=50)
+```
+
+```{python}
+# n_forecast_days = 35
+
+# prior_predictive = my_model.prior_predictive(
+#     n_datapoints=len(data_observed_hospital_admissions) + n_forecast_days,
+#     numpyro_predictive_args={"num_samples": 200},
+# )
+```
+```{python}
+init_vals = get_initialization(stan_data,stdev=0.01,rng_key=jax.random.PRNGKey(0))
+```
+
+```{python}
+from numpyro.infer.initialization import init_to_sample, init_to_value
+try:
+    my_model.run(
+        num_warmup=100,
+        num_samples=100,
+        rng_key=jax.random.key(223),
+        data_observed_hospital_admissions=data_observed_hospital_admissions,
+        data_observed_log_conc=data_observed_log_conc,
+        mcmc_args=dict(num_chains=1),
+        nuts_args=dict(init_strategy=init_to_value(values=init_vals))
+    )
+except RuntimeError as e:
+    print(f"RuntimeError occurred: {e}")
+```
+
+```{python}
+try:
+    with numpyro.handlers.trace() as tr:
+        my_model.run(
+            num_warmup=100,
+            num_samples=100,
+            rng_key=jax.random.key(223),
+            data_observed_hospital_admissions=data_observed_hospital_admissions,
+            data_observed_log_conc=data_observed_log_conc,
+            mcmc_args=dict(num_chains=1),
+            nuts_args=dict(init_strategy=init_to_value(values=init_vals))
+        )
+except AssertionError as e:
+    print(f"AssertionError occurred: {e}")
+```
+
+```{python}
+# Print trace of the random variables
+for site in tr.values():
+    print(site['name'], site['value'])
+```

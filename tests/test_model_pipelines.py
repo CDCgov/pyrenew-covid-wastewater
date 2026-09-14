@@ -40,7 +40,7 @@ def test_fable_pipeline_declares_ed_visit_input_resolution(tmp_path, resolution)
     )
     assert pipeline.ed_visit_input_resolution == resolution
     assert pipeline.model_name == f"{resolution}_fable_e_other"
-    assert pipeline.minimum_exclude_last_n_days == 4
+    assert pipeline.minimum_exclude_last_n_days == 3
 
 
 @patch("cfa.stf.routine.fable.forecast_fable.fable_e_other_forecasts")

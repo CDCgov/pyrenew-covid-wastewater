@@ -165,8 +165,8 @@ When fitting stops before the report date because `exclude_last_n_days` is nonze
 `run.first_training_date` and `run.last_training_date` are instead derived from the observations actually retained.
 For daily models, forecasting often means generating `run.n_forecast_days` days from that observed last training date through `run.forecast_through`.
 See the Fable and PyRenew implementations.
-Fable requires at least four omitted calendar days.
-EpiAutoGP also requires at least four when it runs without a nowcast source.
+Fable requires at least three omitted calendar days.
+EpiAutoGP also requires at least three when it runs without a nowcast source.
 
 ## 4. Add orchestration explicitly
 

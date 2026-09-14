@@ -36,7 +36,7 @@ Percentage inputs are calculated from the aggregated disease and other-visit cou
 
 Nowcast modes are:
 
-- `none`: fit from the observed series only, omitting at least the four most recent available calendar days;
+- `none`: fit from the observed series only, omitting at least the three most recent available calendar days;
 - `reporting-delay`: inflate the recent tail of a count series using a reporting-delay PMF;
 - `hubverse`: read probabilistic NHSN trajectories from one materialized `model-output/CFA-nowcastNHSN/*.parquet` artifact.
 

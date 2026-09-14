@@ -242,12 +242,30 @@ daily_partitions_def = dg.DailyPartitionsDefinition(
 # ============================================================================
 
 
-# using default_factory to prevent ConfigOverrides from populating fields in the Launchpad
+# Use default_factory to prevent ConfigOverrides from populating fields in the
+# Launchpad. The model prefixes on the lookback fields are intentional: these
+# controls have different production defaults and affect disjoint model sets.
 class _ModelTrainingFields(BaseModel):
-    output_basedir: str = Field(default_factory=lambda: "")
-    n_lookback_days: int | None = Field(default_factory=lambda: None)
-    exclude_last_n_days: int = Field(default_factory=lambda: 0)
-    fail_on_stale_data: bool = Field(default_factory=lambda: is_production)
+    output_basedir: str = Field(
+        default_factory=lambda: "",
+        description="Output directory used by all forecast models.",
+    )
+    fable_pyrenew_n_lookback_days: int | None = Field(
+        default_factory=lambda: None,
+        description="Training lookback used only by Fable and PyRenew models.",
+    )
+    epiautogp_n_lookback_days: int | None = Field(
+        default_factory=lambda: None,
+        description="Training lookback used only by EpiAutoGP models.",
+    )
+    exclude_last_n_days: int = Field(
+        default_factory=lambda: 0,
+        description="Requested recent-data omission used by all forecast models.",
+    )
+    fail_on_stale_data: bool = Field(
+        default_factory=lambda: is_production,
+        description="Stale-input policy used by all forecast models.",
+    )
 
 
 class ConfigOverride(_ModelTrainingFields, dg.Config):
@@ -259,16 +277,37 @@ class ConfigOverride(_ModelTrainingFields, dg.Config):
 
 class ModelBaseConfig(_ModelTrainingFields, dg.ConfigurableResource):
     """
-    Base configuration for all model assets.
-    Contains parameters common to Fable and Pyrenew models.
+    Shared configuration and explicitly model-scoped lookbacks for model assets.
     """
 
-    output_basedir: str = "output" if is_production else "test-output"
-    n_lookback_days: int | None = 150
-    exclude_last_n_days: int = 1
-    fail_on_stale_data: bool = is_production
-    diseases: GraphDimension[Disease] = GraphDimension(DISEASES)  # type: ignore[reportInvalidTypeForm]
-    locations: GraphDimension[Location] = GraphDimension(LOCATIONS)  # type: ignore[reportInvalidTypeForm]
+    output_basedir: str = Field(
+        default="output" if is_production else "test-output",
+        description="Output directory used by all forecast models.",
+    )
+    fable_pyrenew_n_lookback_days: int | None = Field(
+        default=150,
+        description="Training lookback used only by Fable and PyRenew models.",
+    )
+    epiautogp_n_lookback_days: int | None = Field(
+        default=None if is_production else 150,
+        description="Training lookback used only by EpiAutoGP models.",
+    )
+    exclude_last_n_days: int = Field(
+        default=1,
+        description="Requested recent-data omission used by all forecast models.",
+    )
+    fail_on_stale_data: bool = Field(
+        default=is_production,
+        description="Stale-input policy used by all forecast models.",
+    )
+    diseases: GraphDimension[Disease] = Field(  # type: ignore[reportInvalidTypeForm]
+        default=GraphDimension(DISEASES),
+        description="Diseases run by all selected forecast models.",
+    )
+    locations: GraphDimension[Location] = Field(  # type: ignore[reportInvalidTypeForm]
+        default=GraphDimension(LOCATIONS),
+        description="Locations run by all selected forecast models.",
+    )
     # Add defaults here, or add in the launchpad with ctrl+space
     config_overrides: list[ConfigOverride] = Field(
         default=[
@@ -276,9 +315,9 @@ class ModelBaseConfig(_ModelTrainingFields, dg.ConfigurableResource):
         ],
         description=(
             "Provide location-specific overrides as a list of dicts. "
-            "The Launchpad accepts both yaml and json-style lists e.g."
-            "config_overrides: [{ location: GA, exclude_last_n_days: 2 }]"
-            ""
+            "Each field retains the model scope stated in its description. "
+            "The Launchpad accepts both YAML and JSON-style lists, e.g. "
+            "config_overrides: [{ location: GA, exclude_last_n_days: 2 }]."
         ),
     )  # type: ignore[reportInvalidTypeForm]
 
@@ -319,7 +358,6 @@ class PyrenewConfig(dg.ConfigurableResource):
 class EpiAutoGPEPctEpiweeklyConfig(dg.ConfigurableResource):
     """Configuration for the epiweekly EpiAutoGP E-pct model asset."""
 
-    n_lookback_days: int | None = None if is_production else 150
     n_particles: int = 64 if is_production else 4
     n_mcmc: int = 200 if is_production else 100
     n_hmc: int = 50 if is_production else 25
@@ -378,14 +416,15 @@ def _run_fable_e_other(
     location = model_base_config.locations.current_value
     run_date = dt.datetime.strptime(context.partition_key, "%Y-%m-%d").date()
 
-    # we let the user potentially override the basedir,
-    # but subdir is locked to the partition date
-    daily_forecast_output_dir: Path = Path(
-        model_base_config.output_basedir,
-        f"{context.partition_key}_forecasts",
-    )
     loc_config = model_base_config.get_by_location(location)
     context.log.debug(f"loc_config: '{loc_config}'")
+
+    # We let the user potentially override the basedir, but the subdirectory is
+    # locked to the partition date.
+    daily_forecast_output_dir: Path = Path(
+        loc_config.output_basedir,
+        f"{context.partition_key}_forecasts",
+    )
 
     context.log.info(f"fable_e_other_config: '{fable_e_other_config}'")
     context.log.info(f"Will write to: {daily_forecast_output_dir}")
@@ -393,12 +432,12 @@ def _run_fable_e_other(
         disease=disease,
         loc=location,
         output_dir=daily_forecast_output_dir,
-        n_lookback_days=loc_config.n_lookback_days,
+        n_lookback_days=loc_config.fable_pyrenew_n_lookback_days,
         n_samples=fable_e_other_config.n_samples,
         exclude_last_n_days=loc_config.exclude_last_n_days,
         ed_visit_input_resolution=ed_visit_input_resolution,
         run_date=run_date,
-        fail_on_stale_data=model_base_config.fail_on_stale_data,
+        fail_on_stale_data=loc_config.fail_on_stale_data,
     )
 
 
@@ -417,10 +456,13 @@ def _run_pyrenew_model(
     location = model_base_config.locations.current_value
     run_date = dt.datetime.strptime(context.partition_key, "%Y-%m-%d").date()
 
-    # we let the user potentially override the basedir,
-    # but subdir is locked to the partition date
+    loc_config = model_base_config.get_by_location(location)
+    context.log.debug(f"loc_config: '{loc_config}'")
+
+    # We let the user potentially override the basedir, but the subdirectory is
+    # locked to the partition date.
     daily_forecast_output_dir: Path = Path(
-        model_base_config.output_basedir, f"{context.partition_key}_forecasts"
+        loc_config.output_basedir, f"{context.partition_key}_forecasts"
     )
 
     fit_flags = flags_from_hew_letters(model_letters)
@@ -428,9 +470,6 @@ def _run_pyrenew_model(
         f"{model_letters}{pyrenew_config.additional_forecast_letters}",
         flag_prefix="forecast",
     )
-    loc_config = model_base_config.get_by_location(location)
-    context.log.debug(f"loc_config: '{loc_config}'")
-
     context.log.info(f"config: '{pyrenew_config}'")
     context.log.info(f"Will write to: {daily_forecast_output_dir}")
     forecast_pyrenew(
@@ -438,14 +477,14 @@ def _run_pyrenew_model(
         loc=location,
         priors_path=PRODUCTION_PRIORS,
         output_dir=daily_forecast_output_dir,
-        n_lookback_days=loc_config.n_lookback_days,
+        n_lookback_days=loc_config.fable_pyrenew_n_lookback_days,
         n_chains=pyrenew_config.n_chains,
         n_warmup=pyrenew_config.n_warmup,
         n_samples=pyrenew_config.n_samples,
         exclude_last_n_days=loc_config.exclude_last_n_days,
         rng_key=pyrenew_config.rng_key,
         run_date=run_date,
-        fail_on_stale_data=model_base_config.fail_on_stale_data,
+        fail_on_stale_data=loc_config.fail_on_stale_data,
         **fit_flags,
         **forecast_flags,
     )
@@ -462,12 +501,12 @@ def _run_epiautogp_e_pct_epiweekly(
     disease = model_base_config.diseases.current_value
     location = model_base_config.locations.current_value
     run_date = dt.datetime.strptime(context.partition_key, "%Y-%m-%d").date()
-    daily_forecast_output_dir = Path(
-        model_base_config.output_basedir,
-        f"{context.partition_key}_forecasts",
-    )
     loc_config = model_base_config.get_by_location(location)
     context.log.debug(f"loc_config: '{loc_config}'")
+    daily_forecast_output_dir = Path(
+        loc_config.output_basedir,
+        f"{context.partition_key}_forecasts",
+    )
     context.log.info(
         f"epiautogp_e_pct_epiweekly_config: '{epiautogp_e_pct_epiweekly_config}'"
     )
@@ -477,7 +516,7 @@ def _run_epiautogp_e_pct_epiweekly(
         disease=disease,
         loc=location,
         output_dir=daily_forecast_output_dir,
-        n_lookback_days=epiautogp_e_pct_epiweekly_config.n_lookback_days,
+        n_lookback_days=loc_config.epiautogp_n_lookback_days,
         target="nssp",
         frequency="epiweekly",
         ed_visit_type="pct",
@@ -508,13 +547,13 @@ def get_model_loc_dir(
     run_date = dt.datetime.strptime(context.partition_key, "%Y-%m-%d").date()
     forecast_window = ForecastWindow(
         report_date=run_date,
-        n_lookback_days=loc_config.n_lookback_days,
+        n_lookback_days=loc_config.fable_pyrenew_n_lookback_days,
         exclude_last_n_days=loc_config.exclude_last_n_days,
     )
     model_batch_dir_name = forecast_window.model_batch_dir_name(disease)
 
     model_loc_dir = Path(
-        model_base_config.output_basedir,
+        loc_config.output_basedir,
         f"{context.partition_key}_forecasts",
         model_batch_dir_name,
         "model_runs",

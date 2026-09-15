@@ -2,6 +2,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+import pytest
+
 from cfa.stf.routine import dagster_defs
 
 
@@ -16,7 +18,6 @@ def _model_base_config() -> dagster_defs.ModelBaseConfig:
             dagster_defs.ConfigOverride(
                 location="CA",
                 output_basedir="ca-output",
-                n_lookback_days=101,
                 exclude_last_n_days=2,
                 fail_on_stale_data=False,
             ).as_dict()
@@ -53,40 +54,47 @@ def test_launchpad_has_model_defaults_and_shared_location_override():
     )
 
 
-def test_omitted_location_lookback_retains_model_defaults():
+@pytest.mark.parametrize(
+    ("override_fields", "expected_lookbacks"),
+    [
+        pytest.param(
+            {"exclude_last_n_days": 2},
+            (100, 200),
+            id="omitted-retains-model-defaults",
+        ),
+        pytest.param(
+            {"n_lookback_days": 101},
+            (101, 101),
+            id="value-applies-to-all-models",
+        ),
+        pytest.param(
+            {"n_lookback_days": None},
+            (None, None),
+            id="explicit-null-applies-to-all-models",
+        ),
+    ],
+)
+def test_location_lookback_override(
+    override_fields: dict[str, object],
+    expected_lookbacks: tuple[int | None, int | None],
+):
     config = dagster_defs.ModelBaseConfig(
         fable_pyrenew_n_lookback_days=100,
         epiautogp_n_lookback_days=200,
         config_overrides=[
             dagster_defs.ConfigOverride(
                 location="CA",
-                exclude_last_n_days=2,
+                **override_fields,
             ).as_dict()
         ],
     )
 
     loc_config = config.get_by_location("CA")
 
-    assert loc_config.fable_pyrenew_n_lookback_days == 100
-    assert loc_config.epiautogp_n_lookback_days == 200
-
-
-def test_explicit_null_location_lookback_applies_to_all_models():
-    config = dagster_defs.ModelBaseConfig(
-        fable_pyrenew_n_lookback_days=100,
-        epiautogp_n_lookback_days=200,
-        config_overrides=[
-            dagster_defs.ConfigOverride(
-                location="CA",
-                n_lookback_days=None,
-            ).as_dict()
-        ],
-    )
-
-    loc_config = config.get_by_location("CA")
-
-    assert loc_config.fable_pyrenew_n_lookback_days is None
-    assert loc_config.epiautogp_n_lookback_days is None
+    assert (
+        loc_config.fable_pyrenew_n_lookback_days,
+        loc_config.epiautogp_n_lookback_days,
+    ) == expected_lookbacks
 
 
 def test_model_runners_use_their_named_lookbacks(monkeypatch):
@@ -130,11 +138,11 @@ def test_model_runners_use_their_named_lookbacks(monkeypatch):
     for forecast in (forecast_fable, forecast_pyrenew):
         for name, expected in shared_arguments.items():
             assert forecast.call_args.kwargs[name] == expected
-        assert forecast.call_args.kwargs["n_lookback_days"] == 101
+        assert forecast.call_args.kwargs["n_lookback_days"] == 100
 
     for name, expected in shared_arguments.items():
         assert forecast_epiautogp.call_args.kwargs[name] == expected
-    assert forecast_epiautogp.call_args.kwargs["n_lookback_days"] == 101
+    assert forecast_epiautogp.call_args.kwargs["n_lookback_days"] == 200
 
 
 def test_fusion_directory_uses_fable_pyrenew_lookback():
@@ -145,5 +153,5 @@ def test_fusion_directory_uses_fable_pyrenew_lookback():
     model_base_config = _model_base_config()
 
     assert dagster_defs.get_model_loc_dir(context, model_base_config) == Path(
-        "ca-output/2026-09-09_forecasts/covid_lookback-101_omit-2/model_runs/CA"
+        "ca-output/2026-09-09_forecasts/covid_lookback-100_omit-2/model_runs/CA"
     )

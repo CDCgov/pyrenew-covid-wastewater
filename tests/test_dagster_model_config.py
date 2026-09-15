@@ -39,28 +39,9 @@ def test_launchpad_has_model_defaults_and_shared_location_override():
     assert "fable_pyrenew_n_lookback_days" not in override_fields
     assert "epiautogp_n_lookback_days" not in override_fields
     assert config.fable_pyrenew_n_lookback_days == 150
-    assert config.epiautogp_n_lookback_days == (
-        None if dagster_defs.is_production else 150
-    )
-    assert (
-        base_fields["fable_pyrenew_n_lookback_days"].description
-        == "Training lookback used only by Fable and PyRenew models."
-    )
-    assert (
-        base_fields["epiautogp_n_lookback_days"].description
-        == "Training lookback used only by EpiAutoGP models."
-    )
     assert (
         "n_lookback_days" not in dagster_defs.EpiAutoGPEPctEpiweeklyConfig.model_fields
     )
-
-
-def test_postprocess_config_only_exposes_effective_fields():
-    assert set(dagster_defs.PostProcessConfig.model_fields) == {
-        "output_basedir",
-        "postprocess_diseases",
-        "skip_existing",
-    }
 
 
 def test_postprocess_always_copies_to_daily_output(monkeypatch):

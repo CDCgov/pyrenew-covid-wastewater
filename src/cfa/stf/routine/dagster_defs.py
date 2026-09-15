@@ -385,8 +385,6 @@ class PostProcessConfig(dg.Config):
 
     output_basedir: str = "output" if is_production else "test-output"
     skip_existing: bool = False
-    save_local_copy: bool = False
-    local_copy_dir: str = ""
     postprocess_diseases: list[str] = ["covid", "flu", "rsv"]
 
 

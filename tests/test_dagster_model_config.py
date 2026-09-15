@@ -2,6 +2,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+import dagster as dg
 import pytest
 
 from cfa.stf.routine import dagster_defs
@@ -51,6 +52,38 @@ def test_launchpad_has_model_defaults_and_shared_location_override():
     )
     assert (
         "n_lookback_days" not in dagster_defs.EpiAutoGPEPctEpiweeklyConfig.model_fields
+    )
+
+
+def test_postprocess_config_only_exposes_effective_fields():
+    assert set(dagster_defs.PostProcessConfig.model_fields) == {
+        "output_basedir",
+        "postprocess_diseases",
+        "skip_existing",
+    }
+
+
+def test_postprocess_always_copies_to_daily_output(monkeypatch):
+    postprocess = Mock()
+    monkeypatch.setattr(dagster_defs, "_throw_if_backfill", Mock())
+    monkeypatch.setattr(dagster_defs, "postprocess", postprocess)
+
+    with dg.build_asset_context(partition_key="2026-09-09") as context:
+        dagster_defs.postprocess_forecasts(
+            context,
+            dagster_defs.PostProcessConfig(
+                output_basedir="custom-output",
+                postprocess_diseases=["flu"],
+                skip_existing=True,
+            ),
+        )
+
+    daily_output = Path("custom-output/2026-09-09_forecasts")
+    postprocess.assert_called_once_with(
+        base_forecast_dir=daily_output,
+        diseases=["flu"],
+        skip_existing=True,
+        local_copy_dir=daily_output,
     )
 
 

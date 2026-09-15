@@ -167,5 +167,9 @@ def test_fusion_directory_uses_fable_pyrenew_lookback():
     model_base_config = _model_base_config()
 
     assert dagster_defs.get_model_loc_dir(context, model_base_config) == Path(
-        "ca-output/2026-09-09_forecasts/covid_lookback-100_omit-2/model_runs/CA"
+        "ca-output",
+        "2026-09-09_forecasts",
+        "covid_lookback-100_omit-2",
+        "model_runs",
+        "CA",
     )

@@ -25,10 +25,8 @@ from cfa_dagster import (
     docker_executor,
     dynamic_executor,
     dynamic_graph_asset,
+    is_production,
     start_dev_env,
-)
-from cfa_dagster import (
-    is_production as is_prod,
 )
 from pydantic import BaseModel, Field
 from pygit2.repository import Repository
@@ -50,6 +48,9 @@ from cfa.stf.routine.utils.r_utils import (
 
 log = logging.getLogger(__name__)
 
+# return the initialized value as a variable
+is_prod = is_production()
+
 # ignore beta automation condition sensor warnings
 warnings.filterwarnings(
     "ignore",
@@ -62,8 +63,6 @@ warnings.filterwarnings(
 
 # get the user running the Dagster instance
 user = os.getenv("DAGSTER_USER")
-
-is_production = is_prod()
 
 start_dev_env(__name__)
 
@@ -110,7 +109,7 @@ except Exception:
 registry = "cfaprdbatchcr.azurecr.io"
 tag = (
     "latest"
-    if (is_production or current_branch_name == "main")
+    if (is_prod or current_branch_name == "main")
     else current_branch_name.replace("/", "-")
 )
 image = f"{registry}/{local_workdir.name}:{tag}"
@@ -165,7 +164,7 @@ docker_execution_config = ExecutionConfig(
 _azure_batch_shared_config = {
     **(
         {}
-        if is_production  # image will come from the code location in prod
+        if is_prod  # image will come from the code location in prod
         else {"image": image}
     ),
     "container_kwargs": {
@@ -247,7 +246,7 @@ class _ModelTrainingFields(BaseModel):
     output_basedir: str = Field(default_factory=lambda: "")
     n_lookback_days: int | None = Field(default_factory=lambda: None)
     exclude_last_n_days: int = Field(default_factory=lambda: 0)
-    fail_on_stale_data: bool = Field(default_factory=lambda: is_production)
+    fail_on_stale_data: bool = Field(default_factory=lambda: is_prod)
 
 
 class ConfigOverride(_ModelTrainingFields, dg.Config):
@@ -263,10 +262,10 @@ class ModelBaseConfig(_ModelTrainingFields, dg.ConfigurableResource):
     Contains parameters common to Fable and Pyrenew models.
     """
 
-    output_basedir: str = "output" if is_production else "test-output"
+    output_basedir: str = "output" if is_prod else "test-output"
     n_lookback_days: int | None = 150
     exclude_last_n_days: int = 1
-    fail_on_stale_data: bool = is_production
+    fail_on_stale_data: bool = is_prod
     diseases: GraphDimension[Disease] = GraphDimension(DISEASES)  # type: ignore[reportInvalidTypeForm]
     locations: GraphDimension[Location] = GraphDimension(LOCATIONS)  # type: ignore[reportInvalidTypeForm]
     # Add defaults here, or add in the launchpad with ctrl+space
@@ -300,7 +299,7 @@ class FableEOtherConfig(dg.ConfigurableResource):
     These default values can be modified in the Dagster asset materialization launchpad.
     """
 
-    n_samples: int = 400 if not is_production else 2000
+    n_samples: int = 400 if not is_prod else 2000
 
 
 class PyrenewConfig(dg.ConfigurableResource):
@@ -309,9 +308,9 @@ class PyrenewConfig(dg.ConfigurableResource):
     These default values can be modified in the Dagster asset materialization launchpad.
     """
 
-    n_warmup: int = 200 if not is_production else 1000
-    n_samples: int = 200 if not is_production else 500
-    n_chains: int = 2 if not is_production else 4
+    n_warmup: int = 200 if not is_prod else 1000
+    n_samples: int = 200 if not is_prod else 500
+    n_chains: int = 2 if not is_prod else 4
     rng_key: int = 12345
     additional_forecast_letters: str = ""
 
@@ -319,10 +318,10 @@ class PyrenewConfig(dg.ConfigurableResource):
 class EpiAutoGPEPctEpiweeklyConfig(dg.ConfigurableResource):
     """Configuration for the epiweekly EpiAutoGP E-pct model asset."""
 
-    n_lookback_days: int | None = None if is_production else 150
-    n_particles: int = 64 if is_production else 4
-    n_mcmc: int = 200 if is_production else 100
-    n_hmc: int = 50 if is_production else 25
+    n_lookback_days: int | None = None if is_prod else 150
+    n_particles: int = 64 if is_prod else 4
+    n_mcmc: int = 200 if is_prod else 100
+    n_hmc: int = 50 if is_prod else 25
     n_forecast_draws: int = 2000
     smc_data_proportion: float = 0.1
     n_threads: str = "auto"
@@ -343,7 +342,7 @@ class PostProcessConfig(dg.Config):
     Configuration for the Post-Processing asset.
     """
 
-    output_basedir: str = "output" if is_production else "test-output"
+    output_basedir: str = "output" if is_prod else "test-output"
     skip_existing: bool = False
     save_local_copy: bool = False
     local_copy_dir: str = ""
@@ -640,6 +639,9 @@ eager_on_wed = (
 weekly_fable_sensor = dg.AutomationConditionSensorDefinition(
     name="Fable",
     target=dg.AssetSelection.groups("Fable"),
+    default_status=dg.DefaultSensorStatus.RUNNING
+    if is_prod
+    else dg.DefaultSensorStatus.STOPPED,
     run_tags=azure_batch_2cpu_execution_config.to_run_tags(),
     use_user_code_server=True,  # allows for custom automation conditions
 )
@@ -647,6 +649,9 @@ weekly_fable_sensor = dg.AutomationConditionSensorDefinition(
 weekly_pyrenew_sensor = dg.AutomationConditionSensorDefinition(
     name="Pyrenew",
     target=dg.AssetSelection.groups("Pyrenew"),
+    default_status=dg.DefaultSensorStatus.RUNNING
+    if is_prod
+    else dg.DefaultSensorStatus.STOPPED,
     run_tags=azure_batch_4cpu_execution_config.to_run_tags(),
     use_user_code_server=True,  # allows for custom automation conditions
 )
@@ -654,6 +659,9 @@ weekly_pyrenew_sensor = dg.AutomationConditionSensorDefinition(
 weekly_fusion_sensor = dg.AutomationConditionSensorDefinition(
     name="Fusion",
     target=dg.AssetSelection.groups("Fusion"),
+    default_status=dg.DefaultSensorStatus.RUNNING
+    if is_prod
+    else dg.DefaultSensorStatus.STOPPED,
     run_tags=azure_batch_2cpu_execution_config.to_run_tags(),
     use_user_code_server=True,  # allows for custom automation conditions
 )
@@ -663,6 +671,9 @@ epiautogp_sensor = dg.AutomationConditionSensorDefinition(
     # add a group_name="EpiAutoGP" to an epiautogp asset to include it
     # in the rules and configuration this sensor provides
     target=dg.AssetSelection.groups("EpiAutoGP"),
+    default_status=dg.DefaultSensorStatus.RUNNING
+    if is_prod
+    else dg.DefaultSensorStatus.STOPPED,
     run_tags=azure_batch_64cpu_execution_config.to_run_tags(),
     use_user_code_server=True,  # allows for custom automation conditions
 )
@@ -1065,7 +1076,7 @@ def reset_prod_server_image_for_wednesday():
 
 
 # These are only used in dev - they should not appear on the production webserver
-if not is_production:
+if not is_prod:
     # Build and Push Image ---------------------------
 
     @dg.op

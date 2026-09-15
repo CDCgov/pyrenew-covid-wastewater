@@ -43,9 +43,13 @@ FORECAST_DATES = [
     dt.date(2024, 2, 6),
     dt.date(2024, 2, 7),
 ]
+TRAINING_DATES = [dt.date(2024, 1, 1) + dt.timedelta(days=i) for i in range(36)]
 REPORT_DATE = dt.date(2024, 2, 3)
 EXPECTED_DATES = FORECAST_DATES * 2
-EXPECTED_DRAWS = [1, 1, 2, 2]
+EPIAUTOGP_EXPECTED_DATES = (TRAINING_DATES + FORECAST_DATES) * 2
+EPIAUTOGP_EXPECTED_DRAWS = [
+    draw for draw in range(1, 3) for _ in range(len(TRAINING_DATES + FORECAST_DATES))
+]
 
 
 @dataclass(frozen=True)
@@ -78,11 +82,9 @@ def _skip_if_r_packages_missing(*packages: str) -> None:
 
 
 def _write_epiautogp_input(path: Path) -> None:
-    start_date = dt.date(2024, 1, 1)
-    dates = [start_date + dt.timedelta(days=i) for i in range(36)]
-    reports = [12.0 + (i % 7) * 0.4 + i * 0.05 for i in range(len(dates))]
+    reports = [12.0 + (i % 7) * 0.4 + i * 0.05 for i in range(len(TRAINING_DATES))]
     input_data = {
-        "dates": [date.isoformat() for date in dates],
+        "dates": [date.isoformat() for date in TRAINING_DATES],
         "reports": reports,
         "pathogen": "covid",
         "location": "US",
@@ -206,8 +208,8 @@ def test_epiautogp_samples_parquet_date_is_discovered_by_polars(
 
     assert samples.schema["date"] == pl.Date
     assert samples.schema[".draw"] == pl.Int32
-    assert samples["date"].to_list() == EXPECTED_DATES
-    assert samples[".draw"].to_list() == EXPECTED_DRAWS
+    assert samples["date"].to_list() == EPIAUTOGP_EXPECTED_DATES
+    assert samples[".draw"].to_list() == EPIAUTOGP_EXPECTED_DRAWS
 
     lazy_schema = (
         pl.scan_parquet(epiautogp_interop_paths.samples_path)
@@ -224,7 +226,7 @@ def test_epiautogp_samples_parquet_date_is_discovered_by_r_dplyr(
     _skip_if_r_packages_missing("forecasttools", "dplyr", "lubridate")
     expected_dates_r = ", ".join(
         _quote_for_embedded_code(expected_date.isoformat())
-        for expected_date in EXPECTED_DATES
+        for expected_date in EPIAUTOGP_EXPECTED_DATES
     )
     r_code = textwrap.dedent(
         f"""

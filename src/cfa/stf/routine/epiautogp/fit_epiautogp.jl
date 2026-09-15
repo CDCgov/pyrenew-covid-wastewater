@@ -187,7 +187,7 @@ end
 Prepares the input data for modelling by:
     - Excluding nowcast dates from the stable data used to fit the base model
     - Creating nowcast data structures if nowcast reports are provided
-    - Generating forecast dates through the final target date
+    - Generating prediction dates across the training and forecast periods
     - Determine the data forwards and inverse transformations
 """
 function prepare_for_modelling(
@@ -223,6 +223,7 @@ function prepare_for_modelling(
             "$last_training_date and $(input.forecast_through)",
     )
     forecast_dates = [last_training_date + i * time_step for i in 1:n_ahead]
+    prediction_dates = vcat(input.dates, forecast_dates)
 
     n_forecasts_per_nowcast = isnothing(nowcast_data) ?
         n_forecasts :
@@ -232,7 +233,7 @@ function prepare_for_modelling(
         stable_data_dates,
         stable_data_values,
         nowcast_data,
-        forecast_dates,
+        prediction_dates,
         n_forecasts_per_nowcast,
         transformation,
         inv_transformation,
@@ -269,14 +270,14 @@ If nowcast data is provided, generate forecasts for each nowcast scenario and po
 function _do_forecasts(
         nowcast_data,
         base_model,
-        forecast_dates,
+        prediction_dates,
         n_forecasts_per_nowcast::Int;
         inv_transformation,
     )
     return forecast_with_nowcasts(
         base_model,
         nowcast_data,
-        forecast_dates,
+        prediction_dates,
         n_forecasts_per_nowcast;
         inv_transformation = inv_transformation,
     )
@@ -285,13 +286,13 @@ end
 function _do_forecasts(
         nowcast_data::Nothing,
         base_model,
-        forecast_dates,
+        prediction_dates,
         n_forecasts_per_nowcast::Int;
         inv_transformation,
     )
     return forecast(
         base_model,
-        forecast_dates,
+        prediction_dates,
         n_forecasts_per_nowcast;
         inv_transformation = inv_transformation,
     )
@@ -315,19 +316,19 @@ function forecast_with_nowcastautogp(input::EpiAutoGPInput, args::Dict{String, A
     forecasts = _do_forecasts(
         model_info.nowcast_data,
         base_model,
-        model_info.forecast_dates,
+        model_info.prediction_dates,
         model_info.n_forecasts_per_nowcast;
         inv_transformation = model_info.inv_transformation,
     )
 
-    return (; forecast_dates = model_info.forecast_dates, forecasts = forecasts)
+    return (; prediction_dates = model_info.prediction_dates, forecasts = forecasts)
 end
 
 ################## Formatting and saving forecast output ###############
 function create_forecast_df(results::NamedTuple)
     return mapreduce(vcat, enumerate(eachcol(results.forecasts))) do (draw, sampled_values)
         DataFrame(
-            :date => results.forecast_dates,
+            :date => results.prediction_dates,
             Symbol(".value") => sampled_values,
             Symbol(".draw") => fill(Int32(draw), length(sampled_values)),
         )

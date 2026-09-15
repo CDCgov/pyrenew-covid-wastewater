@@ -61,17 +61,11 @@ def test_direct_nowcastautogp_runner_writes_pipeline_parquet(tmp_path) -> None:
     samples = pl.read_parquet(samples_path)
     assert samples.schema["date"] == pl.Date
     assert samples.schema[".draw"] == pl.Int32
-    assert samples["date"].to_list() == [
-        dt.date(2024, 2, 6),
-        dt.date(2024, 2, 7),
-        dt.date(2024, 2, 6),
-        dt.date(2024, 2, 7),
-        dt.date(2024, 2, 6),
-        dt.date(2024, 2, 7),
-        dt.date(2024, 2, 6),
-        dt.date(2024, 2, 7),
+    expected_dates = [dt.date(2024, 1, 1) + dt.timedelta(days=i) for i in range(38)]
+    assert samples["date"].to_list() == expected_dates * 4
+    assert samples[".draw"].to_list() == [
+        draw for draw in range(1, 5) for _ in range(38)
     ]
-    assert samples[".draw"].to_list() == [1, 1, 2, 2, 3, 3, 4, 4]
     assert samples[".variable"].unique().to_list() == ["prop_disease_ed_visits"]
     assert samples["resolution"].unique().to_list() == ["daily"]
     assert samples["geo_value"].unique().to_list() == ["US"]

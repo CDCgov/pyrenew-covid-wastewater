@@ -243,20 +243,11 @@ daily_partitions_def = dg.DailyPartitionsDefinition(
 
 
 # Use default_factory to prevent ConfigOverrides from populating fields in the
-# Launchpad. The model prefixes on the lookback fields are intentional: these
-# controls have different production defaults and affect disjoint model sets.
-class _ModelTrainingFields(BaseModel):
+# Launchpad unless the user explicitly sets them.
+class _SharedModelConfigFields(BaseModel):
     output_basedir: str = Field(
         default_factory=lambda: "",
         description="Output directory used by all forecast models.",
-    )
-    fable_pyrenew_n_lookback_days: int | None = Field(
-        default_factory=lambda: None,
-        description="Training lookback used only by Fable and PyRenew models.",
-    )
-    epiautogp_n_lookback_days: int | None = Field(
-        default_factory=lambda: None,
-        description="Training lookback used only by EpiAutoGP models.",
     )
     exclude_last_n_days: int = Field(
         default_factory=lambda: 0,
@@ -268,14 +259,20 @@ class _ModelTrainingFields(BaseModel):
     )
 
 
-class ConfigOverride(_ModelTrainingFields, dg.Config):
+class ConfigOverride(_SharedModelConfigFields, dg.Config):
     location: Location  # type: ignore[reportInvalidTypeForm]
+    n_lookback_days: int | None = Field(
+        default_factory=lambda: None,
+        description=(
+            "Training lookback applied to all forecast models for this location."
+        ),
+    )
 
     def as_dict(self) -> dict:  # type: ignore[reportInvalidTypeForm]
         return self.model_dump(mode="json", exclude_unset=True)
 
 
-class ModelBaseConfig(_ModelTrainingFields, dg.ConfigurableResource):
+class ModelBaseConfig(_SharedModelConfigFields, dg.ConfigurableResource):
     """
     Shared configuration and explicitly model-scoped lookbacks for model assets.
     """
@@ -315,9 +312,10 @@ class ModelBaseConfig(_ModelTrainingFields, dg.ConfigurableResource):
         ],
         description=(
             "Provide location-specific overrides as a list of dicts. "
-            "Each field retains the model scope stated in its description. "
+            "An explicitly provided n_lookback_days applies to all models, "
+            "which otherwise retain their model-specific defaults. "
             "The Launchpad accepts both YAML and JSON-style lists, e.g. "
-            "config_overrides: [{ location: GA, exclude_last_n_days: 2 }]."
+            "config_overrides: [{ location: GA, n_lookback_days: 120 }]."
         ),
     )  # type: ignore[reportInvalidTypeForm]
 
@@ -328,6 +326,10 @@ class ModelBaseConfig(_ModelTrainingFields, dg.ConfigurableResource):
                 entry = ConfigOverride(**entry)
             if entry.location == loc:
                 overrides = entry.model_dump(exclude={"location"}, exclude_unset=True)
+                if "n_lookback_days" in overrides:
+                    n_lookback_days = overrides.pop("n_lookback_days")
+                    overrides["fable_pyrenew_n_lookback_days"] = n_lookback_days
+                    overrides["epiautogp_n_lookback_days"] = n_lookback_days
                 break
         return self.model_copy(update=overrides)
 

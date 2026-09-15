@@ -16,8 +16,7 @@ def _model_base_config() -> dagster_defs.ModelBaseConfig:
             dagster_defs.ConfigOverride(
                 location="CA",
                 output_basedir="ca-output",
-                fable_pyrenew_n_lookback_days=101,
-                epiautogp_n_lookback_days=201,
+                n_lookback_days=101,
                 exclude_last_n_days=2,
                 fail_on_stale_data=False,
             ).as_dict()
@@ -28,11 +27,15 @@ def _model_base_config() -> dagster_defs.ModelBaseConfig:
     return config
 
 
-def test_launchpad_lookback_fields_name_their_models():
+def test_launchpad_has_model_defaults_and_shared_location_override():
     base_fields = dagster_defs.ModelBaseConfig.model_fields
+    override_fields = dagster_defs.ConfigOverride.model_fields
     config = dagster_defs.ModelBaseConfig()
 
     assert "n_lookback_days" not in base_fields
+    assert "n_lookback_days" in override_fields
+    assert "fable_pyrenew_n_lookback_days" not in override_fields
+    assert "epiautogp_n_lookback_days" not in override_fields
     assert config.fable_pyrenew_n_lookback_days == 150
     assert config.epiautogp_n_lookback_days == (
         None if dagster_defs.is_production else 150
@@ -48,6 +51,42 @@ def test_launchpad_lookback_fields_name_their_models():
     assert (
         "n_lookback_days" not in dagster_defs.EpiAutoGPEPctEpiweeklyConfig.model_fields
     )
+
+
+def test_omitted_location_lookback_retains_model_defaults():
+    config = dagster_defs.ModelBaseConfig(
+        fable_pyrenew_n_lookback_days=100,
+        epiautogp_n_lookback_days=200,
+        config_overrides=[
+            dagster_defs.ConfigOverride(
+                location="CA",
+                exclude_last_n_days=2,
+            ).as_dict()
+        ],
+    )
+
+    loc_config = config.get_by_location("CA")
+
+    assert loc_config.fable_pyrenew_n_lookback_days == 100
+    assert loc_config.epiautogp_n_lookback_days == 200
+
+
+def test_explicit_null_location_lookback_applies_to_all_models():
+    config = dagster_defs.ModelBaseConfig(
+        fable_pyrenew_n_lookback_days=100,
+        epiautogp_n_lookback_days=200,
+        config_overrides=[
+            dagster_defs.ConfigOverride(
+                location="CA",
+                n_lookback_days=None,
+            ).as_dict()
+        ],
+    )
+
+    loc_config = config.get_by_location("CA")
+
+    assert loc_config.fable_pyrenew_n_lookback_days is None
+    assert loc_config.epiautogp_n_lookback_days is None
 
 
 def test_model_runners_use_their_named_lookbacks(monkeypatch):
@@ -95,7 +134,7 @@ def test_model_runners_use_their_named_lookbacks(monkeypatch):
 
     for name, expected in shared_arguments.items():
         assert forecast_epiautogp.call_args.kwargs[name] == expected
-    assert forecast_epiautogp.call_args.kwargs["n_lookback_days"] == 201
+    assert forecast_epiautogp.call_args.kwargs["n_lookback_days"] == 101
 
 
 def test_fusion_directory_uses_fable_pyrenew_lookback():

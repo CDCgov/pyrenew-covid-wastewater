@@ -30,7 +30,7 @@ The model input is built directly from the loaded NSSP or NHSN frame.
   | NHSN   | epiweekly          | `observed`                    |
 
 For epiweekly NSSP forecasts, the shared loader retains only complete MMWR weeks.
-For both frequencies, the forecast horizon starts one model time step after the final selected training observation and ends on `forecast_through`.
+For both frequencies, posterior predictions cover the selected training dates and continue through `forecast_through`.
 The Julia adapter derives the number of forecast steps from those two dates and rejects partial-step horizons.
 Percentage inputs are calculated from the aggregated disease and other-visit counts.
 
@@ -39,8 +39,6 @@ Nowcast modes are:
 - `none`: fit from the observed series only, omitting at least the three most recent available calendar days;
 - `reporting-delay`: inflate the recent tail of a count series using a reporting-delay PMF;
 - `hubverse`: read probabilistic NHSN trajectories from one materialized `model-output/CFA-nowcastNHSN/*.parquet` artifact.
-
-Forecasts begin at the next model time point after the final training observation: the next calendar day for daily inputs or the next epiweek for epiweekly inputs.
 
 ## Files
 
